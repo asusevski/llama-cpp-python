@@ -43,6 +43,8 @@ class LlamaModel:
         self.params = params
         self.verbose = verbose
         self._exit_stack = ExitStack()
+        self.sampler = None
+        self.custom_samplers: List[Tuple[int, Any]] = []
 
         model = None
 
