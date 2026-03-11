@@ -243,6 +243,7 @@ class Jinja2ChatFormatter(ChatFormatter):
             tools=tools,
             tool_choice=tool_choice,
             strftime_now=self.strftime_now,
+            **kwargs,
         )
 
         stopping_criteria = None
@@ -599,6 +600,7 @@ def chat_formatter_to_chat_completion_handler(
             function_call=function_call,
             tools=tools,
             tool_choice=tool_choice,
+            **kwargs,
         )
         prompt = llama.tokenize(
             result.prompt.encode("utf-8"),
@@ -744,12 +746,16 @@ def hf_tokenizer_config_to_chat_formatter(
     chat_template = tokenizer_config["chat_template"]
 
     assert "bos_token" in tokenizer_config
-    assert isinstance(tokenizer_config["bos_token"], str)
-    bos_token = tokenizer_config["bos_token"]
+    assert tokenizer_config["bos_token"] is None or isinstance(
+        tokenizer_config["bos_token"], str
+    )
+    bos_token = tokenizer_config["bos_token"] or ""
 
     assert "eos_token" in tokenizer_config
-    assert isinstance(tokenizer_config["eos_token"], str)
-    eos_token = tokenizer_config["eos_token"]
+    assert tokenizer_config["eos_token"] is None or isinstance(
+        tokenizer_config["eos_token"], str
+    )
+    eos_token = tokenizer_config["eos_token"] or ""
 
     env = ImmutableSandboxedEnvironment(
         trim_blocks=True,
@@ -760,22 +766,17 @@ def hf_tokenizer_config_to_chat_formatter(
         messages: List[llama_types.ChatCompletionRequestMessage],
         **kwargs: Any,
     ) -> ChatFormatterResponse:
-        # TODO: veryify this is correct
-        # Add a blank assistant message to the end of the messages to prompt the model to generate a response
-        if add_generation_prompt:
-            messages = [
-                *messages,
-                llama_types.ChatCompletionRequestAssistantMessage(
-                    role="assistant", content=""
-                ),
-            ]
         prompt = env.render(
             messages=messages,
             bos_token=bos_token,
             eos_token=eos_token,
+            add_generation_prompt=add_generation_prompt,
+            **kwargs,
         )
         return ChatFormatterResponse(
-            prompt=prompt, stop=[eos_token, bos_token], added_special=True
+            prompt=prompt,
+            stop=[token for token in (eos_token, bos_token) if token],
+            added_special=True,
         )
 
     return format_tokenizer_config

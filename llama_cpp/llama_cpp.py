@@ -462,6 +462,15 @@ LLAMA_ATTENTION_TYPE_UNSPECIFIED = -1
 LLAMA_ATTENTION_TYPE_CAUSAL = 0
 LLAMA_ATTENTION_TYPE_NON_CAUSAL = 1
 
+# enum llama_flash_attn_type {
+#     LLAMA_FLASH_ATTN_TYPE_AUTO     = -1,
+#     LLAMA_FLASH_ATTN_TYPE_DISABLED = 0,
+#     LLAMA_FLASH_ATTN_TYPE_ENABLED  = 1,
+# };
+LLAMA_FLASH_ATTN_TYPE_AUTO = -1
+LLAMA_FLASH_ATTN_TYPE_DISABLED = 0
+LLAMA_FLASH_ATTN_TYPE_ENABLED = 1
+
 
 # enum llama_split_mode {
 #     LLAMA_SPLIT_MODE_NONE  = 0, // single GPU
@@ -710,9 +719,12 @@ class llama_model_params(ctypes.Structure):
         kv_overrides (ctypes.Array[llama_model_kv_override]): override key-value pairs of the model meta data
         vocab_only (bool): only load the vocabulary, no weights
         use_mmap (bool): use mmap if possible
+        use_direct_io (bool): use direct IO if supported
         use_mlock (bool): force system to keep model in RAM
         check_tensors (bool): validate model tensor data
-        use_extra_bufts (bool): use extra buffer types (used for weight repacking)"""
+        use_extra_bufts (bool): use extra buffer types (used for weight repacking)
+        no_host (bool): bypass host buffer allowing extra buffers to be used
+        no_alloc (bool): only load metadata and simulate memory allocations"""
 
     if TYPE_CHECKING:
         devices: CtypesArray[ctypes.c_void_p]  # NOTE: unused
@@ -726,9 +738,12 @@ class llama_model_params(ctypes.Structure):
         kv_overrides: CtypesArray[llama_model_kv_override]
         vocab_only: bool
         use_mmap: bool
+        use_direct_io: bool
         use_mlock: bool
         check_tensors: bool
         use_extra_bufts: bool
+        no_host: bool
+        no_alloc: bool
 
     _fields_ = [
         ("devices", ctypes.c_void_p), # NOTE: unnused
@@ -742,9 +757,12 @@ class llama_model_params(ctypes.Structure):
         ("kv_overrides", ctypes.POINTER(llama_model_kv_override)),
         ("vocab_only", ctypes.c_bool),
         ("use_mmap", ctypes.c_bool),
+        ("use_direct_io", ctypes.c_bool),
         ("use_mlock", ctypes.c_bool),
         ("check_tensors", ctypes.c_bool),
         ("use_extra_bufts", ctypes.c_bool),
+        ("no_host", ctypes.c_bool),
+        ("no_alloc", ctypes.c_bool),
     ]
 
 
@@ -810,6 +828,7 @@ class llama_context_params(ctypes.Structure):
         rope_scaling_type (int): RoPE scaling type, from `enum llama_rope_scaling_type`
         pooling_type (int): whether to pool (sum) embedding results by sequence id (ignored if no pooling layer)
         attention_type (int): attention type to use for embeddings
+        flash_attn_type (int): when to enable Flash Attention
         rope_freq_base (float): RoPE base frequency, 0 = from model
         rope_freq_scale (float): RoPE frequency scaling factor, 0 = from model
         yarn_ext_factor (float): YaRN extrapolation mix factor, negative = from model
@@ -826,11 +845,12 @@ class llama_context_params(ctypes.Structure):
         abort_callback_data (ctypes.ctypes.c_void_p): data for abort_callback
         embeddings (bool): if true, extract embeddings (together with logits)
         offload_kqv (bool): whether to offload the KQV ops (including the KV cache) to GPU
-        flash_attn (bool): whether to use flash attention
         no_perf (bool): whether to measure performance timings
         op_offload (bool): offload host tensor operations to device
         swa_full (bool): use full-size SWA cache
         kv_unified (bool): use a unified buffer across the input sequences when computing the attention
+        samplers (ctypes.c_void_p): backend sampler chain configuration
+        n_samplers (int): number of backend sampler chain entries
     """
 
     if TYPE_CHECKING:
@@ -843,6 +863,7 @@ class llama_context_params(ctypes.Structure):
         rope_scaling_type: int
         pooling_type: int
         attention_type: int
+        flash_attn_type: int
         rope_freq_base: float
         rope_freq_scale: float
         yarn_ext_factor: float
@@ -859,11 +880,12 @@ class llama_context_params(ctypes.Structure):
         abort_callback_data: ctypes.c_void_p
         embeddings: bool
         offload_kqv: bool
-        flash_attn: bool
         no_perf: bool
         op_offload: bool
         swa_full: bool
         kv_unified: bool
+        samplers: ctypes.c_void_p
+        n_samplers: int
 
     _fields_ = [
         ("n_ctx", ctypes.c_uint32),
@@ -875,6 +897,7 @@ class llama_context_params(ctypes.Structure):
         ("rope_scaling_type", ctypes.c_int),
         ("pooling_type", ctypes.c_int),
         ("attention_type", ctypes.c_int),
+        ("flash_attn_type", ctypes.c_int),
         ("rope_freq_base", ctypes.c_float),
         ("rope_freq_scale", ctypes.c_float),
         ("yarn_ext_factor", ctypes.c_float),
@@ -891,11 +914,12 @@ class llama_context_params(ctypes.Structure):
         ("abort_callback_data", ctypes.c_void_p),
         ("embeddings", ctypes.c_bool),
         ("offload_kqv", ctypes.c_bool),
-        ("flash_attn", ctypes.c_bool),
         ("no_perf", ctypes.c_bool),
         ("op_offload", ctypes.c_bool),
         ("swa_full", ctypes.c_bool),
         ("kv_unified", ctypes.c_bool),
+        ("samplers", ctypes.c_void_p),
+        ("n_samplers", ctypes.c_size_t),
     ]
 
 
@@ -1409,6 +1433,7 @@ def llama_pooling_type(ctx: llama_context_p, /) -> int:
     "llama_get_kv_self",
     [llama_context_p_ctypes],
     llama_kv_cache_p_ctypes,
+    enabled=False,
 )
 def llama_get_kv_self(ctx: llama_context_p, /) -> Optional[llama_kv_cache_p]:
     """Get the KV cache for self-attention (DEPRECATED)"""
@@ -1739,6 +1764,7 @@ def llama_adapter_lora_free(adapter: llama_adapter_lora_p, /):
     "llama_set_adapter_lora",
     [llama_context_p_ctypes, llama_adapter_lora_p_ctypes, ctypes.c_float],
     ctypes.c_int32,
+    enabled=False,
 )
 def llama_set_adapter_lora(
     ctx: llama_context_p, adapter: llama_adapter_lora_p, scale: float, /
@@ -1757,6 +1783,7 @@ def llama_set_adapter_lora(
     "llama_rm_adapter_lora",
     [llama_context_p_ctypes, llama_adapter_lora_p_ctypes],
     ctypes.c_int32,
+    enabled=False,
 )
 def llama_rm_adapter_lora(
     ctx: llama_context_p, adapter: llama_adapter_lora_p, /
@@ -1772,6 +1799,7 @@ def llama_rm_adapter_lora(
     "llama_clear_adapter_lora",
     [llama_context_p_ctypes],
     None,
+    enabled=False,
 )
 def llama_clear_adapter_lora(ctx: llama_context_p, /):
     """Remove all LoRA adapters from given context"""
@@ -1802,6 +1830,7 @@ def llama_clear_adapter_lora(ctx: llama_context_p, /):
         ctypes.c_int32,
     ],
     ctypes.c_int32,
+    enabled=False,
 )
 def llama_apply_adapter_cvec(
     ctx: llama_context_p,
@@ -2045,7 +2074,7 @@ def llama_memory_can_shift(mem: llama_memory_t, /) -> bool:
 # DEPRECATED(LLAMA_API int32_t llama_kv_self_n_tokens(const struct llama_context * ctx),
 #            "Use llama_kv_self_seq_pos_max() and llama_kv_self_seq_pos_min() instead (https://github.com/ggml-org/llama.cpp/issues/13793)");
 @ctypes_function(
-    "llama_kv_self_n_tokens", [llama_context_p_ctypes], ctypes.c_int32
+    "llama_kv_self_n_tokens", [llama_context_p_ctypes], ctypes.c_int32, enabled=False
 )
 def llama_kv_self_n_tokens(ctx: llama_context_p, /) -> int:
     """Returns the number of tokens in the KV cache (slow, use only for debug) (DEPRECATED)"""
@@ -2056,7 +2085,7 @@ def llama_kv_self_n_tokens(ctx: llama_context_p, /) -> int:
 # DEPRECATED(LLAMA_API int32_t llama_kv_self_used_cells(const struct llama_context * ctx),
 #            "Use llama_kv_self_seq_pos_max() and llama_kv_self_seq_pos_min() instead (https://github.com/ggml-org/llama.cpp/issues/13793)");
 @ctypes_function(
-    "llama_kv_self_used_cells", [llama_context_p_ctypes], ctypes.c_int32
+    "llama_kv_self_used_cells", [llama_context_p_ctypes], ctypes.c_int32, enabled=False
 )
 def llama_kv_self_used_cells(ctx: llama_context_p, /) -> int:
     """Returns the number of used KV cells (DEPRECATED)"""
@@ -2068,7 +2097,7 @@ def llama_kv_self_used_cells(ctx: llama_context_p, /) -> int:
 #             struct llama_context * ctx),
 #         "Use llama_memory_clear() instead");
 @ctypes_function(
-    "llama_kv_self_clear", [llama_context_p_ctypes], None
+    "llama_kv_self_clear", [llama_context_p_ctypes], None, enabled=False
 )
 def llama_kv_self_clear(ctx: llama_context_p, /):
     """Clear the KV cache (DEPRECATED)"""
@@ -2095,6 +2124,7 @@ def llama_kv_self_clear(ctx: llama_context_p, /):
         llama_pos,
     ],
     ctypes.c_bool,
+    enabled=False,
 )
 def llama_kv_self_seq_rm(
     ctx: llama_context_p,
@@ -2128,6 +2158,7 @@ def llama_kv_self_seq_rm(
         llama_pos,
     ],
     None,
+    enabled=False,
 )
 def llama_kv_self_seq_cp(
     ctx: llama_context_p,
@@ -2147,7 +2178,7 @@ def llama_kv_self_seq_cp(
 #                 llama_seq_id   seq_id),
 #         "Use llama_memory_seq_keep() instead");
 @ctypes_function(
-    "llama_kv_self_seq_keep", [llama_context_p_ctypes, llama_seq_id], None
+    "llama_kv_self_seq_keep", [llama_context_p_ctypes, llama_seq_id], None, enabled=False
 )
 def llama_kv_self_seq_keep(ctx: llama_context_p, seq_id: Union[llama_seq_id, int], /):
     """Keep only specified sequence in KV cache (DEPRECATED)"""
@@ -2176,6 +2207,7 @@ def llama_kv_self_seq_keep(ctx: llama_context_p, seq_id: Union[llama_seq_id, int
         llama_pos,
     ],
     None,
+    enabled=False,
 )
 def llama_kv_self_seq_add(
     ctx: llama_context_p,
@@ -2211,6 +2243,7 @@ def llama_kv_self_seq_add(
         ctypes.c_int,
     ],
     None,
+    enabled=False,
 )
 def llama_kv_self_seq_div(
     ctx: llama_context_p,
@@ -2233,7 +2266,7 @@ def llama_kv_self_seq_div(
 #                 llama_seq_id   seq_id),
 #         "Use llama_memory_seq_pos_min() instead");
 @ctypes_function(
-    "llama_kv_self_seq_pos_min", [llama_context_p_ctypes, llama_seq_id], llama_pos
+    "llama_kv_self_seq_pos_min", [llama_context_p_ctypes, llama_seq_id], llama_pos, enabled=False
 )
 def llama_kv_self_seq_pos_min(
     ctx: llama_context_p, seq_id: Union[llama_seq_id, int], /
@@ -2250,7 +2283,7 @@ def llama_kv_self_seq_pos_min(
 #                 llama_seq_id   seq_id),
 #         "Use llama_memory_seq_pos_max() instead");
 @ctypes_function(
-    "llama_kv_self_seq_pos_max", [llama_context_p_ctypes, llama_seq_id], llama_pos
+    "llama_kv_self_seq_pos_max", [llama_context_p_ctypes, llama_seq_id], llama_pos, enabled=False
 )
 def llama_kv_self_seq_pos_max(
     ctx: llama_context_p, seq_id: Union[llama_seq_id, int], /
@@ -2264,7 +2297,7 @@ def llama_kv_self_seq_pos_max(
 # //   - lazily on next llama_decode()
 # DEPRECATED(LLAMA_API void llama_kv_self_defrag(struct llama_context * ctx),
 #         "simply remove this call, the context will automatically decide when to do a defragmentation based on 'defrag_thold'");
-@ctypes_function("llama_kv_self_defrag", [llama_context_p_ctypes], None)
+@ctypes_function("llama_kv_self_defrag", [llama_context_p_ctypes], None, enabled=False)
 def llama_kv_self_defrag(ctx: llama_context_p, /):
     """Defragment the KV cache (DEPRECATED)"""
     ...
@@ -2273,7 +2306,7 @@ def llama_kv_self_defrag(ctx: llama_context_p, /):
 # // Check if the context supports KV cache shifting
 # DEPRECATED(LLAMA_API bool llama_kv_self_can_shift(const struct llama_context * ctx),
 #         "use llama_memory_can_shift() instead");
-@ctypes_function("llama_kv_self_can_shift", [llama_context_p_ctypes], ctypes.c_bool)
+@ctypes_function("llama_kv_self_can_shift", [llama_context_p_ctypes], ctypes.c_bool, enabled=False)
 def llama_kv_self_can_shift(ctx: llama_context_p, /) -> bool:
     """Check if the context supports KV cache shifting (DEPRECATED)"""
     ...
@@ -2282,7 +2315,7 @@ def llama_kv_self_can_shift(ctx: llama_context_p, /) -> bool:
 # // Apply the KV cache updates (such as K-shifts, defragmentation, etc.)
 # DEPRECATED(LLAMA_API void llama_kv_self_update(struct llama_context * ctx),
 #         "simply remove this call, updates are applied lazily on the next llama_decode()");
-@ctypes_function("llama_kv_self_update", [llama_context_p_ctypes], None)
+@ctypes_function("llama_kv_self_update", [llama_context_p_ctypes], None, enabled=False)
 def llama_kv_self_update(ctx: llama_context_p, /):
     """Apply the KV cache updates (DEPRECATED)"""
     ...
@@ -3806,7 +3839,7 @@ def llama_sampler_init_dist(seed: int) -> llama_sampler_p:
 # /// NOTE: Avoid using on the full vocabulary as the sorting can become slow. For example, apply top-k or top-p sampling first.
 # DEPRECATED(LLAMA_API struct llama_sampler * llama_sampler_init_softmax    (void),
 #     "will be removed in the future (see https://github.com/ggml-org/llama.cpp/pull/9896#discussion_r1800920915)");
-@ctypes_function("llama_sampler_init_softmax", [], llama_sampler_p_ctypes)
+@ctypes_function("llama_sampler_init_softmax", [], llama_sampler_p_ctypes, enabled=False)
 def llama_sampler_init_softmax() -> llama_sampler_p:
     ...
 

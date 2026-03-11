@@ -48,6 +48,18 @@ endfunction()
 if (LLAMA_BUILD)
     set(BUILD_SHARED_LIBS "On")
 
+    # Newer embedded llama.cpp snapshots expect build metadata even when they
+    # are added as a subdirectory instead of built standalone.
+    if (NOT DEFINED LLAMA_BUILD_NUMBER)
+        set(LLAMA_BUILD_NUMBER 0 CACHE STRING "Embedded llama.cpp build number" FORCE)
+    endif()
+    if (NOT DEFINED LLAMA_BUILD_COMMIT)
+        set(LLAMA_BUILD_COMMIT unknown CACHE STRING "Embedded llama.cpp build commit" FORCE)
+    endif()
+    if (NOT DEFINED LLAMA_INSTALL_VERSION)
+        set(LLAMA_INSTALL_VERSION 0.0.${LLAMA_BUILD_NUMBER} CACHE STRING "Embedded llama.cpp install version" FORCE)
+    endif()
+
     set(CMAKE_SKIP_BUILD_RPATH FALSE)
 
     # When building, don't use the install RPATH already

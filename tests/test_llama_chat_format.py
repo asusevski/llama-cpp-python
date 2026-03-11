@@ -86,4 +86,40 @@ def test_hf_tokenizer_config_str_to_chat_formatter():
         ]
     )
 
-    assert chat_formatter_respoonse.prompt == ("<s>[INST] Hello, world! [/INST]</s>" "")
+    assert chat_formatter_respoonse.prompt == "<s>[INST] Hello, world! [/INST]"
+
+
+def test_jinja2_chat_formatter_passes_template_kwargs():
+    chat_formatter = llama_chat_format.Jinja2ChatFormatter(
+        template="{{ '<think>\n\n</think>\n\n' if enable_thinking is defined and enable_thinking is false else '<think>\n' }}",
+        eos_token="<|im_end|>",
+        bos_token="",
+    )
+
+    response = chat_formatter(
+        messages=[
+            ChatCompletionRequestUserMessage(role="user", content="Hello, world!"),
+        ],
+        enable_thinking=False,
+    )
+
+    assert response.prompt == "<think>\n\n</think>\n\n"
+
+
+def test_hf_tokenizer_config_supports_null_bos_and_template_generation_prompt():
+    tokenizer_config = {
+        "chat_template": "{{ bos_token }}{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}{% if enable_thinking is defined and enable_thinking is false %}<think>\n\n</think>\n\n{% endif %}",
+        "bos_token": None,
+        "eos_token": "<|im_end|>",
+    }
+    chat_formatter = hf_tokenizer_config_to_chat_formatter(tokenizer_config)
+
+    response = chat_formatter(
+        messages=[
+            ChatCompletionRequestUserMessage(role="user", content="Hello, world!"),
+        ],
+        enable_thinking=False,
+    )
+
+    assert response.prompt == "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    assert response.stop == ["<|im_end|>"]
